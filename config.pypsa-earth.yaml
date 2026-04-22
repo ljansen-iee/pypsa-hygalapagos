@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: CC0-1.0
 
 version: 0.8.0
-tutorial: true
+tutorial: false
 mode: green_field
 
 logging:
@@ -16,7 +16,7 @@ summary_dir: results/
 foresight: overnight
 
 
-countries: ["NG"]
+countries: ["EC"]
 # Can be replaced by country ["NG", "BJ"], continent ["Africa"] or user-specific region, see more at https://pypsa-earth.readthedocs.io/en/latest/configuration.html#top-level-configuration
 
 enable:
@@ -24,8 +24,8 @@ enable:
   retrieve_databundle_sector: true
   retrieve_cost_data: true # true: retrieves cost data from technology data and saves in resources/costs.csv, false: uses cost data in data/costs.csv
   download_osm_data: true # If 'true', OpenStreetMap data will be downloaded for the above given countries
-  download_global_buildings: false # If 'true', GlobalMLBuildingFootprints data will be downloaded for the above given countries
-  build_natura_raster: true # If 'true', then an exclusion raster will be build. Otherwise use pregenerated raster.
+  download_global_buildings: true # If 'true', GlobalMLBuildingFootprints data will be downloaded for the above given countries
+  build_natura_raster: false # If 'true', then an exclusion raster will be build. Otherwise use pregenerated raster.
   build_cutout: false
   # If "build_cutout" : true, then environmental data is extracted according to `snapshots` date range and `countries`
   # requires cds API key https://cds.climate.copernicus.eu/api-how-to
@@ -258,7 +258,7 @@ transformers:
 atlite:
   nprocesses: 4
   cutouts:
-    cutout-2013-era5-tutorial:
+    cutout-2013-era5:
       module: era5
       dx: 0.3 # cutout resolution
       dy: 0.3 # cutout resolution
@@ -270,7 +270,7 @@ atlite:
 
 renewable:
   onwind:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     resource:
       method: wind
       turbine: Vestas_V112_3MW
@@ -297,7 +297,7 @@ renewable:
     clip_p_max_pu: 1.e-2
     extendable: true
   offwind-ac:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     resource:
       method: wind
       turbine: NREL_ReferenceTurbine_5MW_offshore
@@ -315,7 +315,7 @@ renewable:
     clip_p_max_pu: 1.e-2
     extendable: true
   offwind-dc:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     resource:
       method: wind
       turbine: NREL_ReferenceTurbine_5MW_offshore
@@ -334,7 +334,7 @@ renewable:
     clip_p_max_pu: 1.e-2
     extendable: true
   solar:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     resource:
       method: pv
       panel: CSi
@@ -355,7 +355,7 @@ renewable:
     clip_p_max_pu: 1.e-2
     extendable: true
   hydro:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     hydrobasins_level: 6
     resource:
       method: hydro
@@ -374,7 +374,7 @@ renewable:
       year: 2013 # (optional) year of statistics used to rescale the runoff time series. When not provided, the cutout weather year is used
     multiplier: 1.1 # multiplier applied after the normalization of the hydro production; default 1.0
   csp:
-    cutout: cutout-2013-era5-tutorial
+    cutout: cutout-2013-era5
     resource:
       method: csp
       installation: SAM_solar_tower

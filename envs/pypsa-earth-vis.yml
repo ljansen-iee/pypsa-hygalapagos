@@ -1,0 +1,15 @@
+name: pypsa-earth-vis
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - jupyterlab
+  - pip
+  - plotly
+  - pypsa=1.0.7
+  - snakemake-minimal[version='<8']
+  - cartopy=0.25
+  - country_converter
+  - contextily
+  - fiona
+prefix: /mnt/home/ljansen/miniforge3/envs/pypsa-earth-vis
