@@ -1,2 +1,4 @@
 ,Name,Fueltype,Technology,Set,Country,Capacity,Efficiency,Duration,Volume_Mm3,DamHeight_m,StorageCapacity_MWh,DateIn,DateRetrofit,DateOut,lat,lon,EIC,projectID,bus
-1,New_Diesel_Generator,Diesel,,PP,SL,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-21.1667,27.5167,{nan},{'GPD': {'WRI1023018'}},microgrid_1_gen_bus
+1,Diesel_Santa_Cruz,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.65,-90.35,{nan},{'GPD': {'WRI1023018'}},microgrid_1_gen_bus
+2,Diesel_Isabela,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.9,-91.1,{nan},{'GPD': {'WRI1023019'}},microgrid_2_gen_bus
+3,Diesel_San_Cristobal,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.9,-89.55,{nan},{'GPD': {'WRI1023020'}},microgrid_3_gen_bus
