@@ -122,7 +122,7 @@ def create_bus_regions(microgrids_list, output_path, country_code):
             "geometry": microgrid_shapes,  # Polygon shapes of the regions
         }
     )
-    microgrid_gdf["name"] = country_code
+    microgrid_gdf["name"] = microgrid_names  # unique bus name used as index in build_renewable_profiles
 
     # Save the GeoDataFrame to a GeoJSON file
     save_to_geojson(microgrid_gdf, output_path)
@@ -138,6 +138,8 @@ if __name__ == "__main__":
 
     configure_logging(snakemake)
     country_code = snakemake.params["countries"]
+    if isinstance(country_code, list):
+        country_code = country_code[0]
 
     create_microgrid_shapes(
         snakemake.config["microgrids_list"],
