@@ -40,6 +40,12 @@ def buildings_classification(input_file, crs):
     """
     # Load the GeoJSON file
     microgrid_buildings = gpd.read_file(input_file)
+    if microgrid_buildings.empty or "building" not in microgrid_buildings.columns:
+        raise ValueError(
+            f"Buildings file '{input_file}' is empty or missing the 'building' column. "
+            "The OSM download likely ran with outdated bounding boxes or failed silently. "
+            "Delete the file and re-run the workflow to trigger a fresh download."
+        )
     microgrid_buildings.rename(columns={"building": "tags_building"}, inplace=True)
     # Filter out elements that are Points, keeping only Polygons and MultiPolygons
     microgrid_buildings = microgrid_buildings.loc[
