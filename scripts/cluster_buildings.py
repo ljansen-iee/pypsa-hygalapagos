@@ -119,7 +119,7 @@ def get_central_points_geojson_with_buildings(
 
         # Skip microgrids with no buildings
         if len(filtered_buildings) == 0:
-            _logger.warning(f"Microgrid {grid_name} has no buildings. Skipping.")
+            logger.warning(f"Microgrid {grid_name} has no buildings. Skipping.")
             continue
 
         # Extract building centroids
@@ -130,14 +130,34 @@ def get_central_points_geojson_with_buildings(
         centroids_building = np.array(centroids_building)
 
         # KMeans
+
+
+        # determine number of clusters for this grid
         if isinstance(n_clusters, dict):
-            kmeans = KMeans(n_clusters=n_clusters[grid_name], random_state=0).fit(
-                centroids_building
-            )
+            n_clusters_for_grid = n_clusters.get(grid_name, 0)
         else:
-            kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(
-                centroids_building
+            n_clusters_for_grid = n_clusters
+
+        # Handle empty building lists
+        if centroids_building.size == 0:
+            _logger.warning(
+                f"No buildings found for microgrid '{grid_name}'; skipping clustering."
             )
+            continue
+
+        # Ensure centroids array has the expected 2D shape (n_samples, n_features)
+        # and that we don't request more clusters than samples.
+        n_samples = centroids_building.shape[0]
+        if n_samples < max(1, int(n_clusters_for_grid)):
+            _logger.warning(
+                f"Microgrid '{grid_name}' has {n_samples} buildings < requested "
+                f"n_clusters={n_clusters_for_grid}; reducing to {n_samples}."
+            )
+            n_clusters_for_grid = max(1, n_samples)
+
+        kmeans = KMeans(n_clusters=int(n_clusters_for_grid), random_state=0).fit(
+            centroids_building
+        )
 
         # Central points of clusters
         centroids = kmeans.cluster_centers_
