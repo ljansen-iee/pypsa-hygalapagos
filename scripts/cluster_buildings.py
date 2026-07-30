@@ -117,6 +117,11 @@ def get_central_points_geojson_with_buildings(
             microgrid_buildings["name_microgrid"] == grid_name
         ]
 
+        # Skip microgrids with no buildings
+        if len(filtered_buildings) == 0:
+            _logger.warning(f"Microgrid {grid_name} has no buildings. Skipping.")
+            continue
+
         # Extract building centroids
         centroids_building = [
             (row.geometry.centroid.x, row.geometry.centroid.y)
