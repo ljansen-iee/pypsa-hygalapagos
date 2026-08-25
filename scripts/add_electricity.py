@@ -272,50 +272,24 @@ def attach_conventional_generators(
     ----------
     mode : str, optional
         'green_field' -> standard behavior (default)
-        'brown_field' -> adds virtual import generators on boundary buses
-    lines_path : str, optional
-        Path to OSM lines (required if mode='brown_field')
-    shape_path : str, optional
-        Path to the shape file (required if mode='brown_field')
+        'brown_field' -> same as green_field, i.e. attach existing plants from
+        `ppl` (currently: diesel, solar, wind from powerplants.csv) as the
+        starting installed capacity, since these microgrids are islanded and
+        have no mainland grid connection to fall back on.
+
+    Notes
+    -----
+    brown_field mode used to skip this attachment entirely and instead add an
+    unlimited virtual "grid_import" generator on buses flagged as 'outside'
+    (see mark_external_buses in filter_data.py). That relied on OSM lines
+    crossing the microgrid's bounding box to infer an external connection,
+    which is meaningless here (no real interconnection exists) and, combined
+    with the missing diesel attachment, meant the network had no dispatchable
+    generation at all -> heavy load shedding. A mainland-interconnection
+    scenario should be reintroduced later as an explicit, opt-in option
+    (dedicated interconnection bus + real cable capacity/cost) rather than
+    inferred from the 'outside' flag.
     """
-    # BROWN FIELD MODE
-    if mode == "brown_field":
-        logger.info("Running in brown_field mode: adding virtual import generators...")
-
-        # Ensure 'outside' flag is available
-        if "outside" not in n.buses.columns:
-            raise ValueError(
-                "Network does not contain 'outside' flag. Please run mark_external_buses() first."
-            )
-
-        # Select buses marked as external
-        bus_ids_outside = n.buses.index[n.buses["outside"]].tolist()
-        logger.info(
-            f"Found {len(bus_ids_outside)} external connection buses (from 'outside' flag)."
-        )
-
-        # Define the marginal cost for grid import (same as OCGT reference)
-        marginal_cost = costs.at["OCGT", "marginal_cost"]
-
-        # Add virtual import generators representing external grid connection
-        n.madd(
-            "Generator",
-            [f"grid_import_{bus}" for bus in bus_ids_outside],
-            bus=bus_ids_outside,
-            carrier="grid_import",
-            p_nom_extendable=False,  # not extendable
-            p_nom=1e6,  # effectively infinite capacity
-            marginal_cost=marginal_cost,
-            capital_cost=0.0,
-            efficiency=1.0,
-        )
-
-        logger.info(
-            f"Added {len(bus_ids_outside)} virtual grid import generators on external buses."
-        )
-        return  # skip conventional generator creation
-
-    # GREEN FIELD MODE (standard behavior)
     carriers = set(conventional_carriers) | set(extendable_carriers["Generator"])
     _add_missing_carriers_from_costs(n, costs, carriers)
 
