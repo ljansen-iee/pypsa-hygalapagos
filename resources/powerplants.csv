@@ -1,4 +1,13 @@
-,Name,Fueltype,Technology,Set,Country,Capacity,Efficiency,Duration,Volume_Mm3,DamHeight_m,StorageCapacity_MWh,DateIn,DateRetrofit,DateOut,lat,lon,EIC,projectID,bus
-1,Diesel_Santa_Cruz,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.65,-90.35,{nan},{'GPD': {'WRI1023018'}},microgrid_1_gen_bus
-2,Diesel_Isabela,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.9,-91.1,{nan},{'GPD': {'WRI1023019'}},microgrid_2_gen_bus
-3,Diesel_San_Cristobal,Diesel,,PP,EC,0.0,,0.0,0.0,0.0,0.0,1986,1986.0,2031,-0.9,-89.55,{nan},{'GPD': {'WRI1023020'}},microgrid_3_gen_bus
+Name,Fueltype,Technology,Set,Country,Capacity,Efficiency,Duration,Volume_Mm3,DamHeight_m,StorageCapacity_MWh,DateIn,DateRetrofit,DateOut,lat,lon,EIC,projectID,bus
+Baltra Eólico,onwind,,,EC,2.25,,,,,,,,,-0.441997,-90.265865,,,microgrid_1_gen_bus
+Baltra Solar,solar,,,EC,0.06678,,,,,,,,,-0.443121,-90.267684,,,microgrid_1_gen_bus
+Santa Cruz,diesel,,,EC,11.50,,,,,,,,,-0.73997,-90.32173,,,microgrid_1_gen_bus
+Santa Cruz Solar Puerto Ayora,solar,,,EC,1.52058,,,,,,,,,-0.744501,-90.320501,,,microgrid_1_gen_bus
+Floreana,diesel,,,EC,0.288,,,,,,,,,-1.274617,-90.484957,,,microgrid_4_gen_bus
+Floreana Perla Solar,solar,,,EC,0.021,,,,,,,,,-1.276312,-90.487033,,,microgrid_4_gen_bus
+San Cristóbal,diesel,,,EC,0.492,,,,,,,,,-0.909326,-89.596214,,,microgrid_2_gen_bus
+San Cristóbal Eólico,onwind,,,EC,2.4,,,,,,,,,-0.891882,-89.498996,,,microgrid_2_gen_bus
+San Cristóbal Solar,solar,,,EC,1,,,,,,,,,-0.909154,-89.615085,,,microgrid_2_gen_bus
+San Cristóbal Solar Eolicsa,solar,,,EC,0.03584,,,,,,,,,-0.90892,-89.59609,,,microgrid_2_gen_bus
+Isabela,diesel,,,EC,1.975,,,,,,,,,-0.946656,-90.958793,,,microgrid_3_gen_bus
+Isabela Solar,solar,,,EC,0.95256,,,,,,,,,-0.947083,-90.957859,,,microgrid_3_gen_bus
