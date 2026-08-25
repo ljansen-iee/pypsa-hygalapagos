@@ -765,7 +765,11 @@ def add_buses_to_empty_countries(country_list, fp_country_shapes, buses):
             .reset_index()
             .to_crs(geo_crs)
         )
-        length = len(no_data_countries)
+        # NOTE: one country code can map to several shapes (e.g. one shape per
+        # microgrid/island, all tagged with the same country code), so the
+        # number of placeholder buses must follow the matched shapes, not the
+        # number of distinct country codes.
+        length = len(no_data_countries_shape)
         df = gpd.GeoDataFrame(
             {
                 "voltage": [220000] * length,
