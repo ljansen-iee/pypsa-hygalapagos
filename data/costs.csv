@@ -13,7 +13,7 @@ nuclear,2030,lifetime,45,years,ECF2010 in DIW DataDoc http://hdl.handle.net/1041
 CCGT,2030,lifetime,30,years,IEA2010;
 coal,2030,lifetime,40,years,IEA2010;
 lignite,2030,lifetime,40,years,IEA2010;
-geothermal,2030,lifetime,40,years,IEA2010;
+geothermal,2030,lifetime,50,years,IEA2010;
 biomass,2030,lifetime,30,years,ECF2010 in DIW DataDoc http://hdl.handle.net/10419/80348;
 oil,2030,lifetime,30,years,ECF2010 in DIW DataDoc http://hdl.handle.net/10419/80348;
 onwind,2030,investment,1040,EUR/kWel,DEA https://ens.dk/en/our-services/projections-and-models/technology-data;
@@ -26,7 +26,7 @@ offwind-dc-connection-submarine,2030,investment,2000,EUR/MW/km,DTU report based 
 offwind-dc-connection-underground,2030,investment,1000,EUR/MW/km,Haertel 2017; average + 13% learning reduction
 solar,2030,investment,600,EUR/kWel,DIW DataDoc http://hdl.handle.net/10419/80348;
 biomass,2030,investment,2209,EUR/kWel,DIW DataDoc http://hdl.handle.net/10419/80348;
-geothermal,2030,investment,3392,EUR/kWel,DIW DataDoc http://hdl.handle.net/10419/80348;
+geothermal,2030,investment,5000,EUR/kWel,https://www.ambienteyenergia.gob.ec/chachimbiro-imbabura-tendra-la-primera-central-de-generacion-electrica-con-energia-geotermica/
 coal,2030,investment,1300,EUR/kWel,DIW DataDoc http://hdl.handle.net/10419/80348 PC (Advanced/SuperC);
 lignite,2030,investment,1500,EUR/kWel,DIW DataDoc http://hdl.handle.net/10419/80348;
 solar-rooftop,2030,investment,725,EUR/kWel,ETIP PV;
@@ -46,7 +46,7 @@ solar-utility,2030,FOM,3,%/year,ETIP PV;
 biomass,2030,FOM,4.526935,%/year,DIW DataDoc http://hdl.handle.net/10419/80348;
 geothermal,2030,FOM,2.358491,%/year,DIW DataDoc http://hdl.handle.net/10419/80348;
 coal,2030,FOM,1.923076,%/year,DIW DataDoc http://hdl.handle.net/10419/80348 PC (Advanced/SuperC);
-lignite,2030,FOM,2.0,%/year,DIW DataDoc http://hdl.handle.net/10419/80348 PC (Advanced/SuperC);
+lignite,2030,FOM,2,%/year,DIW DataDoc http://hdl.handle.net/10419/80348 PC (Advanced/SuperC);
 oil,2030,FOM,1.5,%/year,DIW DataDoc http://hdl.handle.net/10419/80348;
 PHS,2030,FOM,1,%/year,DIW DataDoc http://hdl.handle.net/10419/80348;
 hydro,2030,FOM,1,%/year,DIW DataDoc http://hdl.handle.net/10419/80348;
@@ -196,7 +196,7 @@ HVDC inverter pair,2030,investment,150000,EUR/MW,Hagspiel;
 HVDC inverter pair,2030,lifetime,40,years,Hagspiel;
 HVDC inverter pair,2030,FOM,2,%/year,Hagspiel;
 diesel,2030,investment,400,EUR/kWel,DIW;
-diesel,2030,efficiency,0.30,per unit,DIW ;
+diesel,2030,efficiency,0.3,per unit,DIW ;
 diesel,2030,VOM,0.5,EUR/MWhel,DIW;
 diesel,2030,fuel,100,USD/MWhth,DIW;
 MVAC overhead,2030,investment,40,EUR/MW/km, ;
