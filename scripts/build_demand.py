@@ -239,21 +239,33 @@ def calculate_load(
     building_class = pd.read_csv(input_path)
     # Dictionary to store the load profiles for each microgrid
     microgrid_dataframes = {}
-    # Load the sample load profile and create the time index
+    # Load the sample load profile. It is a repeating annual shape (8760
+    # hourly values), not tied to any specific calendar year, so it is
+    # aligned to the requested snapshots by (month, day, hour) rather than
+    # by literal date -- that way `snapshots.start/end` in the config can be
+    # set to any year, not just the year the profile happens to be indexed as.
     df = pd.read_csv(sample_profile)
-    per_unit_load = df["0"] / p  # Scale the load using the provided factor `p`
-    df["per_unit_load"] = per_unit_load
-    time_index = pd.date_range(start="2013-01-01", end="2013-12-31 23:00:00", freq="h")
-    df = df.set_index(time_index)
+    per_unit_load_template = (df["0"] / p).to_numpy()  # Scale by the provided factor `p`
+    template_index = pd.date_range(
+        start="2001-01-01", periods=len(per_unit_load_template), freq="h"
+    )
+    per_unit_by_key = pd.Series(
+        per_unit_load_template,
+        index=[(t.month, t.day, t.hour) for t in template_index],
+    )
 
     # Generate the snapshots range for filtering
     snapshots_range = pd.date_range(
         start=start_date, end=end_date, freq="h", inclusive="both"
     )
 
-    # Filter the DataFrame based on the specified time range
-    df_filtered = df.loc[snapshots_range]
-    per_unit_load = df_filtered["per_unit_load"].values
+    # Reuse Feb 28's shape for Feb 29 in leap years, since the template
+    # itself only covers a 365-day (non-leap) year.
+    lookup_keys = [
+        (t.month, 28 if (t.month, t.day) == (2, 29) else t.day, t.hour)
+        for t in snapshots_range
+    ]
+    per_unit_load = per_unit_by_key.reindex(lookup_keys).to_numpy()
 
     # Loop over each microgrid
     for grid_name in microgrids_list.keys():
