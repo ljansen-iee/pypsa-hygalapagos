@@ -12,7 +12,7 @@ import pandas as pd
 import pypsa
 from _helpers_dist import configure_logging, read_geojson, sets_path_to_root
 from pyproj import Transformer
-from scipy.spatial import Delaunay, distance
+from scipy.spatial import Delaunay, QhullError, distance
 from shapely.geometry import Point, Polygon
 
 _logger = logging.getLogger(__name__)
@@ -134,21 +134,38 @@ def create_microgrid_network(
             microgrid_buses.append(bus_name)
             bus_positions.append((x, y))
 
-        # Check if there are enough points for triangulation
-        if len(bus_positions) < 3:
-            print(f"Not enough points for triangulation in {grid_name}.")
+        # Nothing to connect (microgrid has only its gen_bus, e.g. no buildings)
+        if len(bus_positions) < 2:
+            print(f"Not enough points to connect in {grid_name}.")
             continue
 
-        # Perform Delaunay triangulation to determine bus connections
-        coords = np.array(bus_positions)
-        tri = Delaunay(coords)
-
-        # Collect unique edges from the Delaunay triangulation
-        edges = set()
-        for simplex in tri.simplices:
-            for i in range(3):
-                edge = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
-                edges.add(edge)
+        # With only two buses (gen_bus + a single cluster), there is no
+        # triangulation to perform: just connect them directly.
+        if len(bus_positions) == 2:
+            edges = {(0, 1)}
+        else:
+            # Perform Delaunay triangulation to determine bus connections
+            coords = np.array(bus_positions)
+            try:
+                tri = Delaunay(coords)
+            except QhullError:
+                # The bus positions are (near-)collinear -- this happens routinely
+                # here because gen_bus is the load-weighted average of the cluster
+                # positions, so it is guaranteed to be collinear with them whenever
+                # there are only two clusters. Fall back to a radial/star topology,
+                # connecting every cluster bus directly to gen_bus (index 0).
+                print(
+                    f"Points for {grid_name} are collinear/degenerate; "
+                    "falling back to a star topology centered on gen_bus."
+                )
+                edges = {(0, i) for i in range(1, len(bus_positions))}
+            else:
+                # Collect unique edges from the Delaunay triangulation
+                edges = set()
+                for simplex in tri.simplices:
+                    for i in range(3):
+                        edge = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
+                        edges.add(edge)
 
         # Add lines to the network based on the triangulation edges
         df = pd.DataFrame()
@@ -204,13 +221,23 @@ def create_microgrid_network(
 
             if len(microgrid_list.keys()) > 2:
                 coords = np.array(bus_positions)
-                tri = Delaunay(coords)
-                # Collect unique edges from the Delaunay triangulation
-                edges = set()
-                for simplex in tri.simplices:
-                    for i in range(3):
-                        edge = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
-                        edges.add(edge)
+                try:
+                    tri = Delaunay(coords)
+                except QhullError:
+                    # Collinear/degenerate microgrid positions: fall back to a
+                    # star topology centered on the first microgrid's gen_bus.
+                    print(
+                        "Microgrid gen_bus positions are collinear/degenerate; "
+                        "falling back to a star topology for interconnection."
+                    )
+                    edges = {(0, i) for i in range(1, len(bus_positions))}
+                else:
+                    # Collect unique edges from the Delaunay triangulation
+                    edges = set()
+                    for simplex in tri.simplices:
+                        for i in range(3):
+                            edge = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
+                            edges.add(edge)
                 # Add lines to the network based on the triangulation edges
                 for i, j in edges:
                     bus0 = microgrids[i]
