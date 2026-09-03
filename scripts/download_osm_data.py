@@ -117,136 +117,150 @@ def retrieve_osm_data_geojson(
 
     def _run_feature(feature, geometry_type, outpath):
         DELAY_S = 2.0
-        EMPTY_RETRY_SLEEP_S = 5.0
+        RETRY_SLEEP_S = 5.0
+        MAX_ATTEMPTS_PER_GRID = 3
         last_err: Exception | None = None
         HEADERS = {"User-Agent": "pypsa-distribution/0.0.2", "Accept": "*/*"}
+
+        def _build_query(lat_min, lon_min, lat_max, lon_max):
+            if feature == "building":
+                return f"""
+                [out:json][timeout:300];
+                ( way["building"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                (._;>;);
+                out body;"""
+            elif feature == "minor_line":
+                return f"""
+                [out:json][timeout:300];
+                ( way["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max});
+                  relation["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                (._;>;);
+                out body;"""
+            elif feature == "cable":
+                return f"""
+                [out:json][timeout:300];
+                ( way["power"~"^(cable)$"]({lat_min},{lon_min},{lat_max},{lon_max});
+                  relation["power"~"^(cable)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                (._;>;);
+                out body;"""
+            elif feature == "generator":
+                return f"""
+                [out:json][timeout:300];
+                ( node["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max});
+                  way["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max});
+                  relation["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                (._;>;);
+                out body;"""
+            elif feature == "substation":
+                return f"""
+                [out:json][timeout:300];
+                ( node["power"="substation"]({lat_min},{lon_min},{lat_max},{lon_max});
+                  way["power"="substation"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                (._;>;);
+                out body;"""
+            elif feature == "pole":
+                return f"""
+                [out:json][timeout:300];
+                ( node["power"="pole"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                out body;"""
+            return None
+
+        def _parse_elements(data, grid_name):
+            records = []
+            node_coords = {
+                n["id"]: (n["lon"], n["lat"])
+                for n in data.get("elements", [])
+                if n.get("type") == "node" and "lon" in n and "lat" in n
+            }
+            for el in data.get("elements", []):
+                if (
+                    feature == "pole"
+                    and el.get("type") == "node"
+                    and "lon" in el
+                    and "lat" in el
+                ):
+                    props = {"name_microgrid": grid_name, "id": el.get("id")}
+                    props.update(el.get("tags") or {})
+                    records.append({**props, "geometry": Point(el["lon"], el["lat"])})
+                    continue
+
+                if el.get("type") == "way" and "nodes" in el:
+                    coords = [
+                        node_coords[nid] for nid in el["nodes"] if nid in node_coords
+                    ]
+                    if geometry_type == "Polygon":
+                        if len(coords) >= 3:
+                            if coords[0] != coords[-1]:
+                                coords = coords + [coords[0]]
+                            geom = Polygon(coords)
+                            props = {"name_microgrid": grid_name, "id": el.get("id")}
+                            props.update(el.get("tags") or {})
+                            records.append({**props, "geometry": geom})
+                    else:
+                        if len(coords) >= 2:
+                            geom = LineString(coords)
+                            props = {"name_microgrid": grid_name, "id": el.get("id")}
+                            props.update(el.get("tags") or {})
+                            records.append({**props, "geometry": geom})
+            return records
+
+        def _fetch_grid(grid_name, grid_data) -> list[dict]:
+            nonlocal last_err
+            overpass_query = _build_query(
+                grid_data["lat_min"],
+                grid_data["lon_min"],
+                grid_data["lat_max"],
+                grid_data["lon_max"],
+            )
+            if overpass_query is None:
+                return []
+            try:
+                logger.info(f"Overpass query: {grid_name} / {feature}")
+                r = requests.post(
+                    url, data={"data": overpass_query}, headers=HEADERS, timeout=240
+                )
+                # Only re-issue the request if the first one actually failed --
+                # firing a second request unconditionally just doubles load on
+                # the (rate-limited) Overpass server for no benefit.
+                if r.status_code in (406, 429, 502, 503, 504):
+                    time.sleep(5)
+                    r = requests.post(
+                        url, data={"data": overpass_query}, headers=HEADERS, timeout=240
+                    )
+                r.raise_for_status()
+                data = r.json()
+                return _parse_elements(data, grid_name)
+            except Exception as e:
+                last_err = e
+                logger.warning(f"Overpass error for {grid_name}/{feature}: {e}.")
+                return []
 
         def _collect_records() -> list[dict]:
             records: list[dict] = []
             for grid_name, grid_data in microgrids_list.items():
-                lat_min = grid_data["lat_min"]
-                lon_min = grid_data["lon_min"]
-                lat_max = grid_data["lat_max"]
-                lon_max = grid_data["lon_max"]
-
-                if feature == "building":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( way["building"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    (._;>;);
-                    out body;"""
-                elif feature == "minor_line":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( way["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max});
-                      relation["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    (._;>;);
-                    out body;"""
-                elif feature == "cable":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( way["power"~"^(cable)$"]({lat_min},{lon_min},{lat_max},{lon_max});
-                      relation["power"~"^(cable)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    (._;>;);
-                    out body;"""
-                elif feature == "generator":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( node["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max});
-                      way["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max});
-                      relation["power"~"generator|plant"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    (._;>;);
-                    out body;"""
-                elif feature == "substation":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( node["power"="substation"]({lat_min},{lon_min},{lat_max},{lon_max});
-                      way["power"="substation"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    (._;>;);
-                    out body;"""
-                elif feature == "pole":
-                    overpass_query = f"""
-                    [out:json][timeout:300];
-                    ( node["power"="pole"]({lat_min},{lon_min},{lat_max},{lon_max}); );
-                    out body;"""
-                else:
-                    return records
-
-                try:
-                    logger.info(f"Overpass query: {grid_name} / {feature}")
-                    r = requests.post(
-                        url, data={"data": overpass_query}, headers=HEADERS, timeout=240
+                grid_records: list[dict] = []
+                for attempt in range(1, MAX_ATTEMPTS_PER_GRID + 1):
+                    grid_records = _fetch_grid(grid_name, grid_data)
+                    if grid_records:
+                        break
+                    if attempt < MAX_ATTEMPTS_PER_GRID:
+                        logger.warning(
+                            f"No data for {grid_name}/{feature} "
+                            f"(attempt {attempt}/{MAX_ATTEMPTS_PER_GRID}); "
+                            f"retrying in {RETRY_SLEEP_S:.0f}s..."
+                        )
+                        time.sleep(RETRY_SLEEP_S)
+                if not grid_records:
+                    logger.warning(
+                        f"Giving up on {grid_name}/{feature} after "
+                        f"{MAX_ATTEMPTS_PER_GRID} attempts -- likely Overpass "
+                        "rate-limiting rather than a genuine absence of data."
                     )
-                    if r.status_code in (406, 429, 502, 503, 504):  # retry minimale
-                        time.sleep(5)
-                    r = requests.post(
-                        url, data={"data": overpass_query}, headers=HEADERS, timeout=240
-                    )
-                    r.raise_for_status()
-                    data = r.json()
-
-                    node_coords = {
-                        n["id"]: (n["lon"], n["lat"])
-                        for n in data.get("elements", [])
-                        if n.get("type") == "node" and "lon" in n and "lat" in n
-                    }
-
-                    for el in data.get("elements", []):
-                        if (
-                            feature == "pole"
-                            and el.get("type") == "node"
-                            and "lon" in el
-                            and "lat" in el
-                        ):
-                            props = {"name_microgrid": grid_name, "id": el.get("id")}
-                            props.update(el.get("tags") or {})
-                            records.append(
-                                {**props, "geometry": Point(el["lon"], el["lat"])}
-                            )
-                            continue
-
-                        if el.get("type") == "way" and "nodes" in el:
-                            coords = [
-                                node_coords[nid]
-                                for nid in el["nodes"]
-                                if nid in node_coords
-                            ]
-                            if geometry_type == "Polygon":
-                                if len(coords) >= 3:
-                                    if coords[0] != coords[-1]:
-                                        coords = coords + [coords[0]]
-                                    geom = Polygon(coords)
-                                    props = {
-                                        "name_microgrid": grid_name,
-                                        "id": el.get("id"),
-                                    }
-                                    props.update(el.get("tags") or {})
-                                    records.append({**props, "geometry": geom})
-                            else:
-                                if len(coords) >= 2:
-                                    geom = LineString(coords)
-                                    props = {
-                                        "name_microgrid": grid_name,
-                                        "id": el.get("id"),
-                                    }
-                                    props.update(el.get("tags") or {})
-                                    records.append({**props, "geometry": geom})
-
-                except Exception as e:
-                    nonlocal last_err
-                    last_err = e
-                    logger.warning(f"Overpass error for {grid_name}/{feature}: {e}.")
-                finally:
-                    time.sleep(DELAY_S)
+                records.extend(grid_records)
+                time.sleep(DELAY_S)
             return records
 
         records = _collect_records()
-        if not records:
-            logger.warning(
-                f"No data for '{feature}'. Retrying once in {EMPTY_RETRY_SLEEP_S:.0f}s..."
-            )
-            time.sleep(EMPTY_RETRY_SLEEP_S)
-            records = _collect_records()
 
         outpath = Path(outpath)
         outpath.parent.mkdir(parents=True, exist_ok=True)
