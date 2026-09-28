@@ -483,6 +483,7 @@ rule add_electricity:
 rule solve_network:
     input:
         "networks/elec.nc",
+        tech_costs=COSTS,
     output:
         "networks/results/elec.nc",
     log:

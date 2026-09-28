@@ -10,6 +10,7 @@
 **/pbf
 *.pbf
 *.zip
+*.out
 
 # Untracked files
 config.yaml
