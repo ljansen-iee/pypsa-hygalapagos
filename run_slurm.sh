@@ -1,9 +1,9 @@
 snakemake solve_network --cluster-config config.cluster.yaml \
 --cluster "sbatch -p {cluster.partition} -t {cluster.walltime} -c {cluster.cpus_per_task} --mem {cluster.mem_mb} -x {cluster.exclude}" \
 --jobs 1000 --latency-wait 60 --keep-going \
---rerun-trigger code \
-# --forceall \
-# --rerun-incomplete \
+--rerun-incomplete
+# --forceall
+# --rerun-trigger code \
 # -n \
 
 

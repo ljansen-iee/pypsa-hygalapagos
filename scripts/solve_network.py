@@ -38,11 +38,135 @@ Additionally, some extra constraints specified in :mod:`prepare_network` are add
 import os
 
 import numpy as np
+import pandas as pd
 import pypsa
 from _helpers_dist import configure_logging, sets_path_to_root
 
 
+def _calculate_annuity(lifetime, discount_rate):
+    if isinstance(discount_rate, pd.Series):
+        return pd.Series(1.0 / lifetime, index=discount_rate.index).where(
+            discount_rate == 0,
+            discount_rate
+            / (1.0 - 1.0 / (1.0 + discount_rate) ** lifetime),
+        )
+    if discount_rate > 0:
+        return discount_rate / (1.0 - 1.0 / (1.0 + discount_rate) ** lifetime)
+    return 1.0 / lifetime
+
+
+def load_hydrogen_costs(tech_costs, cost_config, Nyears=1):
+    costs = pd.read_csv(
+        tech_costs,
+        index_col=["technology", "year", "parameter"],
+    )
+
+    costs.loc[costs.unit.str.contains("/kW", na=False), "value"] *= 1e3
+    costs.loc[costs.unit.str.contains("USD", na=False), "value"] *= cost_config[
+        "USD2013_to_EUR2013"
+    ]
+
+    costs = (
+        costs.loc[pd.IndexSlice[:, cost_config["year"], :], "value"]
+        .unstack(level=2)
+        .groupby("technology")
+        .sum(min_count=1)
+    )
+    costs = costs.fillna(
+        {
+            "discount rate": cost_config["discountrate"],
+            "FOM": 0,
+            "VOM": 0,
+            "fuel": 0,
+            "efficiency": 1,
+            "lifetime": 25,
+        }
+    )
+    costs["capital_cost"] = (
+        _calculate_annuity(costs["lifetime"], costs["discount rate"])
+        + costs["FOM"] / 100.0
+    ) * costs["investment"] * Nyears
+    costs["marginal_cost"] = costs["VOM"] + costs["fuel"] / costs["efficiency"]
+
+    return costs
+
+
+def _find_cost_technology(costs, candidates):
+    for candidate in candidates:
+        if candidate in costs.index:
+            return candidate
+    raise KeyError(f"None of the cost technologies are available: {candidates}")
+
+
+def add_hydrogen(n, costs):
+    """Add local hydrogen production, reconversion, and storage."""
+    ac_buses = n.buses.index[n.buses.carrier == "AC"]
+    if ac_buses.empty:
+        raise ValueError("Cannot add hydrogen without AC buses")
+
+    for carrier in ("H2", "H2 Electrolysis", "H2 Fuel Cell", "H2 Store Tank"):
+        if carrier not in n.carriers.index:
+            n.add("Carrier", carrier)
+
+    h2_buses = ac_buses + " H2"
+    for ac_bus, h2_bus in zip(ac_buses, h2_buses):
+        n.add(
+            "Bus",
+            h2_bus,
+            carrier="H2",
+            x=n.buses.at[ac_bus, "x"],
+            y=n.buses.at[ac_bus, "y"],
+        )
+
+        n.add(
+            "Link",
+            f"{ac_bus} H2 Electrolysis",
+            bus0=ac_bus,
+            bus1=h2_bus,
+            p_nom_extendable=True,
+            carrier="H2 Electrolysis",
+            efficiency=costs.at["electrolysis", "efficiency"],
+            capital_cost=costs.at["electrolysis", "capital_cost"],
+            lifetime=costs.at["electrolysis", "lifetime"],
+        )
+
+        n.add(
+            "Link",
+            f"{h2_bus} H2 Fuel Cell",
+            bus0=h2_bus,
+            bus1=ac_bus,
+            p_nom_extendable=True,
+            carrier="H2 Fuel Cell",
+            efficiency=costs.at["fuel cell", "efficiency"],
+            capital_cost=costs.at["fuel cell", "capital_cost"]
+            * costs.at["fuel cell", "efficiency"],
+            lifetime=costs.at["fuel cell", "lifetime"],
+        )
+
+    storage_technology = _find_cost_technology(
+        costs,
+        (
+            "hydrogen storage tank type 1 including compressor",
+            "hydrogen storage tank",
+            "hydrogen storage",
+        ),
+    )
+    for h2_bus in h2_buses:
+        n.add(
+            "Store",
+            f"{h2_bus} Store Tank",
+            bus=h2_bus,
+            e_nom_extendable=True,
+            e_cyclic=True,
+            carrier="H2 Store Tank",
+            capital_cost=costs.at[storage_technology, "capital_cost"],
+        )
+
+    return n
+
+
 def prepare_network(n, solve_opts):
+
     if "clip_p_max_pu" in solve_opts:
         for df in (n.generators_t.p_max_pu, n.storage_units_t.inflow):
             df.where(df > solve_opts["clip_p_max_pu"], other=0.0, inplace=True)
@@ -68,26 +192,6 @@ def prepare_network(n, solve_opts):
             p_nom=1e9,  # kW
         )
 
-    # if solve_opts.get("noisy_costs"):
-    #     for t in n.iterate_components(n.one_port_components):
-    #         # TODO: uncomment out to and test noisy_cost (makes solution unique)
-    #         # if 'capital_cost' in t.df:
-    #         #    t.df['capital_cost'] += 1e1 + 2.*(np.random.random(len(t.df)) - 0.5)
-    #         if "marginal_cost" in t.df:
-    #             t.df["marginal_cost"] += 1e-2 + 2e-3 * (
-    #                 np.random.random(len(t.df)) - 0.5
-    #             )
-
-    # for t in n.iterate_components(["Line", "Link"]):
-    #     t.df["capital_cost"] += (
-    #         1e-1 + 2e-2 * (np.random.random(len(t.df)) - 0.5)
-    #     ) * t.df["length"]
-
-    # if solve_opts.get("nhours"):
-    #     nhours = solve_opts["nhours"]
-    #     n.set_snapshots(n.snapshots[:nhours])
-    #     n.snapshot_weightings[:] = 8760.0 / nhours
-
     return n
 
 
@@ -111,6 +215,14 @@ if __name__ == "__main__":
     solver_name = solver_options.pop("name")
 
     n = pypsa.Network(snakemake.input[0])
+    Nyears = n.snapshot_weightings.objective.sum() / 8760.0
+    costs = load_hydrogen_costs(
+        snakemake.input["tech_costs"],
+        snakemake.config["costs"],
+        Nyears,
+    )
+    n = add_hydrogen(n, costs)
+
     n = prepare_network(n, snakemake.config["solving"]["options"])
 
     n = solve_network(n, solver_name, **solver_options)
