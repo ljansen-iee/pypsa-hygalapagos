@@ -40,62 +40,22 @@ import os
 import numpy as np
 import pandas as pd
 import pypsa
-from _helpers_dist import configure_logging, sets_path_to_root
-
-
-def _calculate_annuity(lifetime, discount_rate):
-    if isinstance(discount_rate, pd.Series):
-        return pd.Series(1.0 / lifetime, index=discount_rate.index).where(
-            discount_rate == 0,
-            discount_rate
-            / (1.0 - 1.0 / (1.0 + discount_rate) ** lifetime),
-        )
-    if discount_rate > 0:
-        return discount_rate / (1.0 - 1.0 / (1.0 + discount_rate) ** lifetime)
-    return 1.0 / lifetime
+from pypsa.descriptors import get_switchable_as_dense as get_as_dense
+from _helpers_dist import configure_logging, pe_helpers, sets_path_to_root
 
 
 def load_hydrogen_costs(tech_costs, cost_config, Nyears=1):
-    costs = pd.read_csv(
+    """Read and annualize one PyPSA-Earth technology-cost file."""
+    return pe_helpers.prepare_costs(
         tech_costs,
-        index_col=["technology", "year", "parameter"],
+        cost_config,
+        cost_config["output_currency"],
+        cost_config["fill_values"],
+        Nyears,
+        cost_config["default_exchange_rate"],
+        cost_config["future_exchange_rate_strategy"],
+        cost_config["custom_future_exchange_rate"],
     )
-
-    costs.loc[costs.unit.str.contains("/kW", na=False), "value"] *= 1e3
-    costs.loc[costs.unit.str.contains("USD", na=False), "value"] *= cost_config[
-        "USD2013_to_EUR2013"
-    ]
-
-    costs = (
-        costs.loc[pd.IndexSlice[:, cost_config["year"], :], "value"]
-        .unstack(level=2)
-        .groupby("technology")
-        .sum(min_count=1)
-    )
-    costs = costs.fillna(
-        {
-            "discount rate": cost_config["discountrate"],
-            "FOM": 0,
-            "VOM": 0,
-            "fuel": 0,
-            "efficiency": 1,
-            "lifetime": 25,
-        }
-    )
-    costs["capital_cost"] = (
-        _calculate_annuity(costs["lifetime"], costs["discount rate"])
-        + costs["FOM"] / 100.0
-    ) * costs["investment"] * Nyears
-    costs["marginal_cost"] = costs["VOM"] + costs["fuel"] / costs["efficiency"]
-
-    return costs
-
-
-def _find_cost_technology(costs, candidates):
-    for candidate in candidates:
-        if candidate in costs.index:
-            return candidate
-    raise KeyError(f"None of the cost technologies are available: {candidates}")
 
 
 def add_hydrogen(n, costs):
@@ -108,60 +68,127 @@ def add_hydrogen(n, costs):
         if carrier not in n.carriers.index:
             n.add("Carrier", carrier)
 
-    h2_buses = ac_buses + " H2"
-    for ac_bus, h2_bus in zip(ac_buses, h2_buses):
-        n.add(
-            "Bus",
-            h2_bus,
-            carrier="H2",
-            x=n.buses.at[ac_bus, "x"],
-            y=n.buses.at[ac_bus, "y"],
-        )
+    n.madd(
+        "Bus",
+        ac_buses + " H2",
+        location=ac_buses,
+        carrier="H2",
+        x=n.buses.loc[ac_buses, "x"].to_numpy(),
+        y=n.buses.loc[ac_buses, "y"].to_numpy(),
+    )
+    n.madd(
+        "Link",
+        ac_buses + " H2 Electrolysis",
+        bus0=ac_buses,
+        bus1=ac_buses + " H2",
+        p_nom_extendable=True,
+        carrier="H2 Electrolysis",
+        efficiency=1 / costs.at["Alkaline electrolyzer large size", "electricity-input"],
+        capital_cost=costs.at["Alkaline electrolyzer large size", "fixed"],
+        lifetime=costs.at["Alkaline electrolyzer large size", "lifetime"],
+    )
+    n.madd(
+        "Link",
+        ac_buses + " H2 turbine",
+        bus0=ac_buses + " H2",
+        bus1=ac_buses,
+        p_nom_extendable=True,
+        carrier="H2 Fuel Cell",
+        efficiency=costs.at["OCGT", "efficiency"],
+        capital_cost=costs.at["OCGT", "fixed"] * costs.at["OCGT", "efficiency"],
+        marginal_cost=costs.at["OCGT", "VOM"],
+        lifetime=costs.at["OCGT", "lifetime"],
+    )
+    n.madd(
+        "Store",
+        ac_buses + " H2 Store Tank",
+        bus=ac_buses + " H2",
+        e_nom_extendable=True,
+        e_cyclic=True,
+        carrier="H2 Store Tank",
+        capital_cost=costs.at["Hydrogen-store", "fixed"],
+        lifetime=costs.at["Hydrogen-store", "lifetime"],
+    )
 
-        n.add(
-            "Link",
-            f"{ac_bus} H2 Electrolysis",
-            bus0=ac_bus,
-            bus1=h2_bus,
-            p_nom_extendable=True,
-            carrier="H2 Electrolysis",
-            efficiency=costs.at["electrolysis", "efficiency"],
-            capital_cost=costs.at["electrolysis", "capital_cost"],
-            lifetime=costs.at["electrolysis", "lifetime"],
-        )
+    return n
 
-        n.add(
-            "Link",
-            f"{h2_bus} H2 Fuel Cell",
-            bus0=h2_bus,
-            bus1=ac_bus,
-            p_nom_extendable=True,
-            carrier="H2 Fuel Cell",
-            efficiency=costs.at["fuel cell", "efficiency"],
-            capital_cost=costs.at["fuel cell", "capital_cost"]
-            * costs.at["fuel cell", "efficiency"],
-            lifetime=costs.at["fuel cell", "lifetime"],
-        )
 
-    storage_technology = _find_cost_technology(
-        costs,
-        (
-            "hydrogen storage tank type 1 including compressor",
-            "hydrogen storage tank",
-            "hydrogen storage",
+def add_methanol(n, costs):
+    """Add local methanol assets and a flat 4,000 MWh/year market load."""
+    ac_buses = n.buses.index[n.buses.carrier == "AC"]
+    for carrier in ("methanol", "methanolisation", "CO2 feedstock"):
+        if carrier not in n.carriers.index:
+            n.add("Carrier", carrier)
+
+    n.madd(
+        "Bus",
+        ac_buses + " methanol",
+        location=ac_buses,
+        carrier="methanol",
+        unit="MWh_LHV",
+        x=n.buses.loc[ac_buses, "x"].to_numpy(),
+        y=n.buses.loc[ac_buses, "y"].to_numpy(),
+    )
+    methanol_energy_density = 5.54 * 791 * 1e-3  # MWh/m3
+    n.madd(
+        "Store",
+        ac_buses + " methanol Store",
+        bus=ac_buses + " methanol",
+        e_nom_extendable=True,
+        e_cyclic=True,
+        carrier="methanol",
+        capital_cost=(
+            costs.at["General liquid hydrocarbon storage (product)", "fixed"]
+            / methanol_energy_density
         ),
     )
-    for h2_bus in h2_buses:
-        n.add(
-            "Store",
-            f"{h2_bus} Store Tank",
-            bus=h2_bus,
-            e_nom_extendable=True,
-            e_cyclic=True,
-            carrier="H2 Store Tank",
-            capital_cost=costs.at[storage_technology, "capital_cost"],
-        )
+    n.madd(
+        "Bus",
+        ac_buses + " CO2 feedstock",
+        location=ac_buses,
+        carrier="CO2 feedstock",
+        unit="tCO2",
+        x=n.buses.loc[ac_buses, "x"].to_numpy(),
+        y=n.buses.loc[ac_buses, "y"].to_numpy(),
+    )
+    n.madd(
+        "Generator",
+        ac_buses + " CO2 supply",
+        bus=ac_buses + " CO2 feedstock",
+        carrier="CO2 feedstock",
+        p_nom=np.inf,
+        marginal_cost=80.0,
+    )
 
+    hydrogen_input = costs.at["methanolisation", "hydrogen-input"]
+    efficiency = 1 / hydrogen_input
+    n.madd(
+        "Link",
+        ac_buses + " methanolisation",
+        bus0=ac_buses + " H2",
+        bus1=ac_buses + " methanol",
+        bus2=ac_buses + " CO2 feedstock",
+        bus3=ac_buses,
+        carrier="methanolisation",
+        p_nom_extendable=True,
+        efficiency=efficiency,
+        efficiency2=-costs.at["methanol", "CO2 intensity"],
+        efficiency3=-costs.at["methanolisation", "electricity-input"] / hydrogen_input,
+        capital_cost=costs.at["methanolisation", "fixed"] / hydrogen_input,
+        marginal_cost=costs.at["methanolisation", "VOM"] / hydrogen_input,
+        lifetime=costs.at["methanolisation", "lifetime"],
+    )
+
+    hours = n.snapshot_weightings.generators.sum()
+    if not np.isfinite(hours) or hours <= 0:
+        raise ValueError("Methanol demand requires positive snapshot generator weightings")
+    n.madd(
+        "Load",
+        ac_buses + " methanol market",
+        bus=ac_buses + " methanol",
+        carrier="methanol",
+        p_set=4000 / (hours * len(ac_buses)),
+    )
     return n
 
 
@@ -171,27 +198,55 @@ def prepare_network(n, solve_opts):
         for df in (n.generators_t.p_max_pu, n.storage_units_t.inflow):
             df.where(df > solve_opts["clip_p_max_pu"], other=0.0, inplace=True)
 
-    load_shedding = solve_opts.get("load_shedding")
-    if load_shedding:
-        n.add("Carrier", "Load")
-        buses_i = n.buses.query("carrier == 'AC'").index
-        if not np.isscalar(load_shedding):
-            load_shedding = 8e3  # Eur/kWh
-        # intersect between macroeconomic and surveybased
-        # willingness to pay
-        # http://journal.frontiersin.org/article/10.3389/fenrg.2015.00055/full)
-        # 1e2 is practical relevant, 8e3 good for debugging
-        n.madd(
-            "Generator",
-            buses_i,
-            " load",
-            bus=buses_i,
-            carrier="load",
-            sign=1e-3,  # Adjust sign to measure p and p_nom in kW instead of MW
-            marginal_cost=load_shedding,
-            p_nom=1e9,  # kW
+    def get_load_shedding_capacity(n, safety_margin=1.2):
+        """
+        Calculate required load shedding p_nom per bus based on the
+        maximum aggregated load observed in any snapshot.
+
+        Parameters
+        ----------
+        n : pypsa.Network
+            The PyPSA network
+        safety_margin : float, default 1.2
+            Safety factor to apply to the maximum load
+
+        Returns
+        -------
+        pd.Series
+            Required p_nom per bus for load shedding.
+        """
+
+        load_profiles = get_as_dense(n, "Load", "p_set")
+        load_by_bus = load_profiles.T.groupby(n.loads.bus).sum().T
+        co2_buses = n.buses.index[n.buses.carrier.isin(["co2", "co2 stored"])]
+        load_by_bus = load_by_bus.drop(columns=co2_buses, errors="ignore")
+
+        # Load shedding can cover positive demand only. Negative-only buses, such
+        # as process-emission or CO2 buses, must not receive negative capacities.
+        load_shedding_p_nom = (
+            load_by_bus.max(axis=0).clip(lower=0.0) * safety_margin
         )
 
+        return load_shedding_p_nom.reindex(n.buses.index, fill_value=0.0)
+
+
+    if solve_opts.get("load_shedding"):
+        required_p_nom = get_load_shedding_capacity(n, safety_margin=1.2)
+        n.add("Carrier", "load shedding", color="#dd2e23", nice_name="Load shedding")
+
+        load_shedding_buses = n.buses.index[
+            ~n.buses.carrier.isin(["co2", "co2 stored"])
+        ]
+        n.madd(
+            "Generator",
+            load_shedding_buses,
+            " load shedding",
+            bus=load_shedding_buses,
+            carrier="load shedding",
+            sign=1,
+            marginal_cost=solve_opts.get("load_shedding") * 1000,
+            p_nom=required_p_nom.reindex(load_shedding_buses, fill_value=0.5e6),
+        )
     return n
 
 
@@ -219,8 +274,35 @@ def fixing_missing_carriers(n):
     return n
 
 
-def solve_network(n, solver_name, **solver_options):
-    n.optimize(solver_name=solver_name)
+def solve_network(n, solver_name, capacity_targets=None, **solver_options):
+    capacity_targets = capacity_targets or {}
+
+    def constrain_capacity(network, snapshots):
+        capacities = network.model["Generator-p_nom"]
+        for carrier, target in capacity_targets.items():
+            generators = network.generators.index[
+                (network.generators.carrier == carrier)
+                & network.generators.p_nom_extendable
+            ]
+            fixed = network.generators.loc[
+                (network.generators.carrier == carrier)
+                & ~network.generators.p_nom_extendable,
+                "p_nom",
+            ].sum()
+            if generators.empty:
+                raise ValueError(f"No extendable generators for capacity target: {carrier}")
+            network.model.add_constraints(
+                capacities.loc[generators].sum() == target - fixed,
+                name=f"{carrier}_capacity_target",
+            )
+
+    status, condition = n.optimize(
+        solver_name=solver_name,
+        extra_functionality=constrain_capacity if capacity_targets else None,
+        **solver_options,
+    )
+    if (status, condition) != ("ok", "optimal"):
+        raise RuntimeError(f"Network optimization failed: {status}, {condition}")
 
     return n
 
@@ -240,16 +322,22 @@ if __name__ == "__main__":
 
     n = pypsa.Network(snakemake.input[0])
     Nyears = n.snapshot_weightings.objective.sum() / 8760.0
+    cost_config = snakemake.config["costs"].copy()
     costs = load_hydrogen_costs(
         snakemake.input["tech_costs"],
-        snakemake.config["costs"],
+        cost_config,
         Nyears,
     )
     n = add_hydrogen(n, costs)
+    n = add_methanol(n, costs)
 
     n = prepare_network(n, snakemake.config["solving"]["options"])
     n = fixing_missing_carriers(n)
 
-    n = solve_network(n, solver_name, **solver_options)
+    n = solve_network(
+        n, solver_name,
+        capacity_targets=snakemake.config["solving"].get("capacity_targets"),
+        **solver_options,
+    )
 
     n.export_to_netcdf(snakemake.output[0])

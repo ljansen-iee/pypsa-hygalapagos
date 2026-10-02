@@ -273,9 +273,10 @@ def process_buildings_network(
     output_nodes_geojson: str,
     output_buildings_type_csv: str | None = None,
     *,
+    microgrid_shapes_path: str,
     target_voltages: list = None,
     node_id_col: str = "bus_id",
-    metric_crs: str = "EPSG:32632",
+    metric_crs: str = "EPSG:3857",
     building_type_col: str = "building",
 ):
     if target_voltages is None:
@@ -286,12 +287,37 @@ def process_buildings_network(
 
     nodes = read_nodes_csv(input_nodes_csv, geom_col="geometry", crs="EPSG:4326")
     buildings = gpd.read_file(input_buildings_geojson)
+    microgrid_shapes = gpd.read_file(microgrid_shapes_path).set_index(
+        "name_microgrid"
+    )
     _logger.info(f"Buildings columns before assign_nearest: {list(buildings.columns)}")
     nodes["voltage"] = pd.to_numeric(nodes.get("voltage"), errors="coerce")
     nodes_sel = nodes.loc[nodes["voltage"].isin(target_voltages_V)].copy()
-    buildings_clustered = assign_nearest(
-        buildings, nodes_sel, node_id_col=node_id_col, metric_crs=metric_crs
-    )
+    if buildings.empty:
+        raise ValueError("No buildings are available for brown-field clustering.")
+
+    clustered_buildings = []
+    for microgrid, microgrid_buildings in buildings.groupby("name_microgrid"):
+        if microgrid not in microgrid_shapes.index:
+            raise ValueError(f"No configured polygon for microgrid '{microgrid}'.")
+        polygon = microgrid_shapes.loc[microgrid].geometry
+        if isinstance(polygon, gpd.GeoDataFrame):
+            polygon = polygon.geometry.union_all()
+        microgrid_nodes = nodes_sel.loc[nodes_sel.geometry.intersects(polygon)]
+        if microgrid_nodes.empty:
+            raise ValueError(
+                f"No distribution-voltage OSM or fallback buses inside {microgrid}; "
+                f"eligible voltages are {target_voltages_V} V."
+            )
+        clustered_buildings.append(
+            assign_nearest(
+                microgrid_buildings,
+                microgrid_nodes,
+                node_id_col=node_id_col,
+                metric_crs=metric_crs,
+            )
+        )
+    buildings_clustered = pd.concat(clustered_buildings, ignore_index=True)
     _logger.info(
         f"Buildings columns after assign_nearest: {list(buildings_clustered.columns)}"
     )
@@ -381,5 +407,7 @@ if __name__ == "__main__":
             snakemake.output["clusters_with_buildings"],
             snakemake.output["clusters"],
             snakemake.output["buildings_type"],
+            microgrid_shapes_path=snakemake.input["microgrid_shapes"],
             target_voltages=voltage_node_cluster,
+            metric_crs=snakemake.params.crs["distance_crs"],
         )

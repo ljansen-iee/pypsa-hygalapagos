@@ -256,7 +256,7 @@ def calculate_load(
 
     # Generate the snapshots range for filtering
     snapshots_range = pd.date_range(
-        start=start_date, end=end_date, freq="h", inclusive="both"
+        start=start_date, end=end_date, freq="h", inclusive=inclusive
     )
 
     # Reuse Feb 28's shape for Feb 29 in leap years, since the template
@@ -269,38 +269,61 @@ def calculate_load(
 
     # Loop over each microgrid
     for grid_name in microgrids_list.keys():
-        # Filter buildings belonging to the current microgrid
-        total_buildings = building_class[building_class["name_microgrid"] == grid_name]
-        total_buildings = total_buildings["count"].sum()
-        # Group buildings by cluster and count the number of buildings per cluster
-        building_for_cluster = pd.DataFrame(
-            building_class[building_class["name_microgrid"] == grid_name]
-            .groupby("cluster_id")
-            .sum()["count"]
+        microgrid_buildings = building_class.loc[
+            building_class["name_microgrid"] == grid_name
+        ]
+        if microgrid_buildings.empty or microgrid_buildings["cluster_id"].isna().any():
+            raise ValueError(
+                f"Buildings in {grid_name} are missing assigned distribution buses; "
+                "check brown-field voltage filtering and nearest-node assignment."
+            )
+
+        building_for_cluster = (
+            microgrid_buildings.groupby("cluster_id")["count"]
+            .sum()
+            .astype(float)
         )
+        total_buildings = building_for_cluster.sum()
+        if total_buildings <= 0:
+            raise ValueError(f"{grid_name} has no buildings with a positive count.")
+
         # Retrieve the population for the current microgrid
-        pop_for_microgrid = pop_microgrid.loc[
+        population_rows = pop_microgrid.loc[
             pop_microgrid["Microgrid_Name"] == grid_name, "Population"
-        ].values[0]
+        ]
+        if population_rows.empty:
+            raise ValueError(f"No WorldPop population value found for {grid_name}.")
+        pop_for_microgrid = float(population_rows.iloc[0])
+        if not np.isfinite(pop_for_microgrid) or pop_for_microgrid <= 0:
+            raise ValueError(
+                f"{grid_name} has buildings but no positive WorldPop population; "
+                "refusing to emit zero demand."
+            )
+
         # Calculate the population per building and per cluster
         population_per_building = pop_for_microgrid / total_buildings
         population_per_cluster = building_for_cluster * population_per_building
-        # Calculate the load for each cluster
+        bus_names = [
+            f"{grid_name}_bus_{int(bus_id) if float(bus_id).is_integer() else bus_id}"
+            for bus_id in population_per_cluster.index
+        ]
         load_per_cluster = pd.DataFrame(
-            np.outer(population_per_cluster["count"].values, per_unit_load)
+            np.outer(
+                per_unit_load,
+                population_per_cluster.to_numpy(dtype=float),
+            ),
+            columns=bus_names,
+            index=snapshots_range,
         )
-        load_per_cluster = load_per_cluster.T  # Transpose for time indexing
-        # Rename columns to represent the buses of the microgrid
-        new_column_names = {
-            i: f"{grid_name}_bus_{i}" for i in range(load_per_cluster.shape[1])
-        }
-        load_per_cluster.rename(columns=new_column_names, inplace=True)
         # Add the DataFrame for the microgrid to the dictionary
         microgrid_dataframes[grid_name] = load_per_cluster
 
     # Concatenate all microgrid DataFrames horizontally
     all_load_per_cluster = pd.concat(microgrid_dataframes.values(), axis=1)
-    all_load_per_cluster.index = snapshots_range
+    if all_load_per_cluster.empty or (all_load_per_cluster.sum(axis=0) <= 0).any():
+        raise ValueError("Generated load profiles contain an empty or zero-demand bus.")
+    if not np.isfinite(all_load_per_cluster.to_numpy(dtype=float)).all():
+        raise ValueError("Generated load profiles contain non-finite values.")
 
     # Save the cumulative results to a CSV file with time index as the first column
     all_load_per_cluster.to_csv(output_file, index_label="Time")

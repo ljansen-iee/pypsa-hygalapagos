@@ -90,6 +90,55 @@ The recurrent meeting on PyPSA-Distribution is every second Tuesday at 17:00 AM 
 
   Remove the -n to do a real run.
 
+## Hydrogen and methanol
+
+The distribution solve adds hydrogen and methanol assets at every AC bus and
+adds a flat methanol load totaling 4,000 MWh/year, split equally among those
+buses. Demand is converted to constant MW using the sum of generator snapshot
+weights; no market volumes or profiles are configured yet.
+
+Run `snakemake -n -j 1 dist_ptx_horizons` to dry-run both planning horizons
+(2035 and 2050), or `snakemake -j 1 dist_ptx_horizons` to build them. To run
+one horizon, target `networks/results/2050/elec.nc`. When `run.name` is
+set, insert its directory between `results/` and the planning-horizon folder.
+
+The solve step adds hydrogen production, reconversion, and storage at every AC
+bus. Methanol demand is placed on local methanol buses and supplied by
+extendable H₂-to-methanol links, also located at every AC bus. Synthesis uses
+the PyPSA-Earth technology-data rows in the matching `data/costs_2035.csv` or
+`data/costs_2050.csv`; its CO₂ requirement is supplied by a **priced, unlimited
+local feedstock proxy at 80 EUR/tCO₂**, not an emissions/capture network.
+These are independent planning-horizon solves; regular non-PtX solves continue
+to use the existing `data/costs.csv` cost path.
+
+The weather/snapshot year is not the planning horizon. Each output is a fresh,
+independent optimization of the same electricity network: no inter-horizon
+capacity carry-forward, and existing electricity-asset costs remain at the
+base `costs.year` (currently 2030).
+
+## Galapagos candidate generation sites
+
+In the green-field Galapagos scenario, the solar and onshore wind suitability
+rasters select distinct, viable candidate locations on each island. The
+`generation_sites` settings target two to five sites per island, with fewer if
+the eligible area or spacing does not support two. Non-overlapping Voronoi
+regions partition each island's original renewable region; the existing atlite
+workflow calculates technology-specific hourly profiles and installable
+capacity limits for each site bus. Suitability is an eligibility mask, not a
+weather downscaling method. Solar and wind can share a site and currently have
+independent land-use limits.
+
+Each site has one candidate line to the nearest load-cluster bus on its island.
+The 10 kV buses and line type represent an aggregated feeder planning network,
+not individual low-voltage services. The straight-line connections use a route
+factor; `line_investment_eur_per_mva_km` is an illustrative upfront cost per
+unit capacity and kilometre, annualized with `line_lifetime_years` and the
+scenario discount rate. Core and candidate lines are both priced. Compare
+line-cost scenarios before interpreting investments: this model does not
+enforce voltage-drop, protection or buildable-corridor constraints. Diesel and
+storage remain on each island's original generation hub, and the islands are
+not interconnected.
+
 ## Training
 
 - We recently updated some [hackathon material](https://github.com/pypsa-meets-earth/documentation) for PyPSA-Earth, which are relevant also for PyPSA-Distribution. The hackathon contains jupyter notebooks with exercises. After going through the 1 day theoretical and practical material you should have a suitable coding setup and feel confident about contributing.

@@ -13,6 +13,7 @@ Inputs come from the Snakemake rule `filter_data`.
 
 import logging
 import os
+import re
 
 import geopandas as gpd
 import pypsa
@@ -23,7 +24,7 @@ from shapely.geometry import Point
 logger = logging.getLogger(__name__)
 
 
-def rename_microgrid_buses(n, microgrids_list):
+def rename_microgrid_buses(n, microgrid_shapes_path):
     """
     Rename all buses in a PyPSA network using a microgrid prefix.
 
@@ -32,22 +33,29 @@ def rename_microgrid_buses(n, microgrids_list):
     n : pypsa.Network
         The input network.
 
-    microgrids_list : dict
-        Dictionary specifying microgrid names. The first key is used
-        as the bus prefix.
+    microgrid_shapes_path : str
+        GeoJSON containing one boundary per microgrid.
 
     Returns
     -------
-    n : pypsa.Network
-        Network with renamed buses and updated references.
+    tuple[pypsa.Network, dict[str, str]]
+        Network with renamed buses and the old-to-new bus-name mapping.
     """
-    microgrid_name = list(microgrids_list.keys())[0]
-
-    # Create mapping old_bus → microgrid_1_bus_old_bus
-    rename_map = {old: f"{microgrid_name}_bus_{old}" for old in n.buses.index}
+    shapes = gpd.read_file(microgrid_shapes_path).set_index("name_microgrid")
+    rename_map = {}
+    for old, bus in n.buses.iterrows():
+        point = Point(bus.x, bus.y)
+        matching_grids = shapes.index[shapes.geometry.covers(point)].tolist()
+        if len(matching_grids) != 1:
+            raise ValueError(
+                f"Bus {old!r} at ({bus.x}, {bus.y}) belongs to {len(matching_grids)} "
+                "configured microgrid polygons; expected exactly one."
+            )
+        microgrid_name = matching_grids[0]
+        rename_map[str(old)] = f"{microgrid_name}_bus_{old}"
 
     # Rename bus index itself
-    n.buses.index = n.buses.index.to_series().map(rename_map)
+    n.buses.index = n.buses.index.astype(str).map(rename_map)
 
     # Update all components that contain bus references
     for comp in [
@@ -65,11 +73,11 @@ def rename_microgrid_buses(n, microgrids_list):
                 if col.startswith("bus"):
                     df[col] = df[col].replace(rename_map)
 
-    logger.info(f"Renamed all buses using prefix '{microgrid_name}_bus_'.")
-    return n
+    logger.info("Renamed buses using their containing microgrid polygons.")
+    return n, rename_map
 
 
-def rename_profile_buses(nc_path, microgrid_name):
+def rename_profile_buses(nc_path, bus_mapping):
     """
     Rename the 'bus' dimension of a renewable profile NetCDF file and
     safely overwrite the original file using a temporary write + os.replace.
@@ -83,7 +91,14 @@ def rename_profile_buses(nc_path, microgrid_name):
         return
 
     old_buses = ds.bus.values.astype(str)
-    rename_map = {b: f"{microgrid_name}_bus_{b}" for b in old_buses}
+    rename_map = {}
+    for bus in old_buses:
+        base_bus = re.sub(r"^(?:microgrid_\d+_bus_)+", "", bus)
+        if base_bus not in bus_mapping:
+            raise ValueError(
+                f"Renewable profile bus {bus!r} does not map to a base-network bus."
+            )
+        rename_map[bus] = bus_mapping[base_bus]
 
     # Apply renaming
     ds = ds.assign_coords(bus=[rename_map[b] for b in old_buses])
@@ -127,7 +142,15 @@ def find_external_connection_buses(n, lines_path, shape_path, crs="EPSG:4326"):
     set
         Set of bus indices connecting to external lines.
     """
+    if os.path.getsize(lines_path) == 0:
+        logger.warning("No cleaned OSM lines found; no external buses can be marked.")
+        return set()
+
     lines_raw = gpd.read_file(lines_path).to_crs(crs)
+    if lines_raw.empty:
+        logger.warning("No cleaned OSM lines found; no external buses can be marked.")
+        return set()
+
     shape = gpd.read_file(shape_path).to_crs(crs)
     area = shape.unary_union
 
@@ -210,11 +233,11 @@ if __name__ == "__main__":
     microgrid_name = list(snakemake.config["microgrids_list"].keys())[0]
 
     # Rename buses in the PyPSA network
-    n = rename_microgrid_buses(n_base, snakemake.config["microgrids_list"])
+    n, bus_mapping = rename_microgrid_buses(n_base, snakemake.input["shape"])
     #  Rename buses inside all renewable profile .nc files
     for key, path in snakemake.input.items():
         if key.startswith("profile_"):
-            rename_profile_buses(path, microgrid_name)
+            rename_profile_buses(path, bus_mapping)
     # Mark external buses
     n = mark_external_buses(n, snakemake.input["raw_lines"], snakemake.input["shape"])
     # Save final updated network

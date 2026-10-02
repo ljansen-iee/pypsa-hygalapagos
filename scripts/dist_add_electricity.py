@@ -207,6 +207,24 @@ def attach_wind_and_solar(
             # If the dataset's "bus" index is empty, skip to the next technology
             if ds.indexes["bus"].empty:
                 continue
+            site_buses = ds["site"].to_pandas() if "site" in ds.coords else ds.indexes["bus"]
+            missing_buses = pd.Index(site_buses).difference(n.buses.index)
+            if not missing_buses.empty:
+                raise ValueError(f"Renewable profile {tech} has undefined buses: {missing_buses.tolist()}")
+            valid = ds["p_nom_max"].to_pandas()
+            valid = valid.index[(valid > 0) & np.isfinite(valid)]
+            if valid.empty:
+                continue
+            ds = ds.sel(bus=valid).load()
+            if not np.isfinite(ds["profile"].values).all():
+                raise ValueError(f"Renewable profile {tech} contains non-finite availability")
+            site_buses = ds["site"].to_pandas() if "site" in ds.coords else ds.indexes["bus"]
+            missing_buses = pd.Index(site_buses).difference(n.buses.index)
+            if len(missing_buses):
+                raise ValueError(f"Renewable profile {tech} refers to missing buses: {missing_buses.tolist()}")
+            ds = ds.where(ds["p_nom_max"] > 0, drop=True).load()
+            if ds.sizes["bus"] == 0:
+                continue
 
         suptech = tech.split("-", 2)[0]
         # Add the wind and solar generators to the power network
@@ -216,7 +234,7 @@ def attach_wind_and_solar(
             # {microgrid},
             " " + tech,  # TODO: review indexes
             # bus=f"new_bus_{microgrid}",
-            bus=ds.indexes["bus"],
+            bus=site_buses,
             carrier=tech,
             p_nom_extendable=tech in extendable_carriers["Generator"],
             p_nom_max=ds["p_nom_max"].to_pandas(),  # look at the config
@@ -224,10 +242,6 @@ def attach_wind_and_solar(
             marginal_cost=costs.at[suptech, "marginal_cost"],
             capital_cost=costs.at[tech, "capital_cost"],
             efficiency=costs.at[suptech, "efficiency"],
-            p_set=ds["profile"]
-            .transpose("time", "bus")
-            .to_pandas()
-            .reindex(n.snapshots),
             p_max_pu=ds["profile"]
             .transpose("time", "bus")
             .to_pandas()
@@ -264,6 +278,7 @@ def attach_conventional_generators(
     conventional_config,
     conventional_inputs,
     mode="green_field",
+    microgrid_shapes_path=None,
 ):
     """
     Attach conventional generators to the network.
@@ -271,11 +286,9 @@ def attach_conventional_generators(
     Parameters
     ----------
     mode : str, optional
-        'green_field' -> standard behavior (default)
-        'brown_field' -> same as green_field, i.e. attach existing plants from
-        `ppl` (currently: diesel, solar, wind from powerplants.csv) as the
-        starting installed capacity, since these microgrids are islanded and
-        have no mainland grid connection to fall back on.
+        'green_field' -> retain conventional plants; suitability-led profiles
+        represent renewable investment options.
+        'brown_field' -> attach plants from `ppl` (diesel, solar, wind) as before.
 
     Notes
     -----
@@ -293,11 +306,51 @@ def attach_conventional_generators(
     carriers = set(conventional_carriers) | set(extendable_carriers["Generator"])
     _add_missing_carriers_from_costs(n, costs, carriers)
 
+    selected_carriers = conventional_carriers if mode == "green_field" else carriers
     ppl = (
-        ppl.query("carrier in @carriers")
+        ppl.query("carrier in @selected_carriers")
         .join(costs, on="carrier", rsuffix="_r")
         .rename(index=lambda s: "C" + str(s))
     )
+    if mode == "brown_field" and not ppl.empty:
+        valid_coords = ppl[["lon", "lat"]].apply(pd.to_numeric, errors="coerce").notna().all(axis=1)
+        if not valid_coords.all():
+            missing = ppl.index[~valid_coords].tolist()
+            raise ValueError(f"Brown-field power plants are missing coordinates: {missing}")
+
+        plant_points = gpd.GeoDataFrame(
+            index=ppl.index,
+            geometry=gpd.points_from_xy(ppl["lon"], ppl["lat"]),
+            crs="EPSG:4326",
+        ).to_crs("EPSG:3857")
+        if microgrid_shapes_path is not None:
+            study_area = gpd.read_file(microgrid_shapes_path).to_crs("EPSG:3857")
+            study_area = study_area.geometry.union_all()
+            inside = plant_points.geometry.apply(study_area.covers)
+            excluded_plants = ppl.index[~inside]
+            if len(excluded_plants):
+                logger.warning(
+                    "Ignoring power plants outside configured microgrids: %s",
+                    excluded_plants.tolist(),
+                )
+            ppl = ppl.loc[inside]
+            plant_points = plant_points.loc[ppl.index]
+        if ppl.empty:
+            logger.warning("No conventional power plants lie inside the microgrids.")
+            return
+
+        bus_points = gpd.GeoDataFrame(
+            {"network_bus": n.buses.index.astype(str)},
+            geometry=gpd.points_from_xy(n.buses.x, n.buses.y),
+            crs="EPSG:4326",
+        ).to_crs("EPSG:3857")
+        nearest = gpd.sjoin_nearest(
+            plant_points, bus_points, how="left", distance_col="distance_m"
+        )
+        nearest_bus = nearest.groupby(level=0)["network_bus"].first().reindex(ppl.index)
+        if nearest_bus.isna().any():
+            raise ValueError("Could not map every brown-field power plant to a network bus.")
+        ppl["bus"] = nearest_bus
     ppl["efficiency"] = ppl.efficiency.fillna(ppl.efficiency)
 
     buses_i = n.buses.index
@@ -402,6 +455,22 @@ def attach_storageunits(
 def attach_load(n, load_file, tech_modelling):
     # Upload the load csv file
     demand_df = pd.read_csv(load_file, index_col=0, parse_dates=True)
+    demand_df = demand_df.reindex(n.snapshots)
+    if demand_df.empty or demand_df.shape[1] == 0:
+        raise ValueError("Electricity demand file contains no bus load profiles.")
+    missing_buses = demand_df.columns.difference(n.buses.index)
+    if not missing_buses.empty:
+        raise ValueError(
+            "Electricity demand profiles reference undefined buses: "
+            f"{missing_buses.tolist()}"
+        )
+    if demand_df.isna().any().any() or not np.isfinite(demand_df.to_numpy()).all():
+        raise ValueError("Electricity demand profiles contain missing/non-finite values.")
+    zero_buses = demand_df.columns[demand_df.sum(axis=0) <= 0]
+    if not zero_buses.empty:
+        raise ValueError(
+            f"Buses with generated demand have zero total load: {zero_buses.tolist()}"
+        )
 
     # Attach load to the central bus of each microgrid
     n.madd("Load", demand_df.columns, bus=demand_df.columns, p_set=demand_df)
@@ -453,6 +522,7 @@ if __name__ == "__main__":
         snakemake.config.get("conventional", {}),
         conventional_inputs,
         mode,
+        microgrid_shapes_path=snakemake.input["microgrid_shapes"],
     )
 
     attach_storageunits(

@@ -1,3 +1,14 @@
+PTX_HORIZONS = [2035, 2050]
+
+
+rule dist_solve_networks_all_horizons:
+    input:
+        expand(
+            "networks/results/" + RDIR + "{planning_horizon}/elec.nc",
+            planning_horizon=PTX_HORIZONS,
+        )
+
+
 rule dist_ramp_build_demand_profile:
     params:
         ramp=config["ramp"],
@@ -48,6 +59,7 @@ rule dist_build_demand:
 rule dist_build_shapes:
     params:
         countries=config["countries"],
+        microgrids_list=config["microgrids_list"],
     output:
         microgrid_shapes="resources/shapes/microgrid_shapes.geojson",
         microgrid_bus_shapes="resources/shapes/microgrid_bus_shapes.geojson",
@@ -84,10 +96,40 @@ if config.get("mode") != "brown_field":
         script:
             "../scripts/dist_cluster_buildings.py"
 
+    if config.get("generation_sites", {}).get("enabled", False):
+        rule dist_build_candidate_sites:
+            input:
+                regions="resources/shapes/microgrid_bus_shapes.geojson",
+                clusters="resources/buildings/clustered_buildings.geojson",
+                solar=config["renewable"]["solar"]["suitability"]["path"],
+                onwind=config["renewable"]["onwind"]["suitability"]["path"],
+            output:
+                "resources/shapes/candidate_sites.geojson",
+            params:
+                suitability={
+                    tech: config["renewable"][tech]["suitability"]
+                    for tech in ("solar", "onwind")
+                },
+                settings=config["generation_sites"],
+            log:
+                "logs/dist_build_candidate_sites.log",
+            benchmark:
+                "benchmarks/dist_build_candidate_sites"
+            threads: 1
+            resources:
+                mem_mb=3000,
+            script:
+                "../scripts/dist_build_candidate_sites.py"
+
     rule dist_create_network:
         input:
             clusters="resources/buildings/clustered_buildings.geojson",
             load="resources/demand/microgrid_load.csv",
+            candidate_sites=(
+                "resources/shapes/candidate_sites.geojson"
+                if config.get("generation_sites", {}).get("enabled", False)
+                else []
+            ),
         output:
             "networks/" + RDIR + "base.nc",
         log:
@@ -104,6 +146,9 @@ if config.get("mode") != "brown_field":
 if config["enable"].get("download_osm_buildings", True):
 
     rule dist_download_osm_data:
+        params:
+            overpass_options=config.get("osm_download", {}).get("overpass", {}),
+            microgrids_list=config["microgrids_list"],
         output:
             buildings_resources="resources/"
             + RDIR
@@ -158,7 +203,6 @@ if config.get("mode") == "brown_field":
             substations="resources/" + RDIR + "osm/raw/all_raw_substations.geojson",
             country_shapes="resources/shapes/microgrid_shapes.geojson",
             offshore_shapes=pypsaearth("resources/shapes/offshore_shapes.geojson"),
-            africa_shape=pypsaearth("resources/shapes/africa_shape.geojson"),
         output:
             generators="resources/" + RDIR + "osm/clean/all_clean_generators.geojson",
             generators_csv="resources/" + RDIR + "osm/clean/all_clean_generators.csv",
@@ -169,11 +213,12 @@ if config.get("mode") == "brown_field":
         benchmark:
             "benchmarks/" + RDIR + "clean_osm_data"
         script:
-            pypsaearth("scripts/clean_osm_data.py")
+            "../pypsa-earth/scripts/clean_osm_data.py"
 
     rule dist_build_osm_network:
         params:
             build_osm_network=config.get("build_osm_network", {}),
+            fallback_bus_voltage_kv=config["build_osm_network"]["fallback_bus_voltage_kv"],
             countries=config["countries"],
             crs=config["crs"],
         input:
@@ -207,6 +252,7 @@ if config.get("mode") == "brown_field":
             all_nodes_brown_field="resources/"
             + RDIR
             + "base_network/all_buses_build_network.csv",
+            microgrid_shapes="resources/shapes/microgrid_shapes.geojson",
         output:
             clusters="resources/buildings/clustered_buildings.geojson",
             clusters_with_buildings="resources/buildings/cluster_with_buildings.geojson",
@@ -252,7 +298,7 @@ if config.get("mode") == "brown_field":
         resources:
             mem_mb=500,
         script:
-            pypsaearth("scripts/base_network.py")
+            "../pypsa-earth/scripts/base_network.py"
 
     rule dist_build_bus_regions:
         params:
@@ -281,7 +327,7 @@ if config.get("mode") == "brown_field":
         resources:
             mem_mb=1000,
         script:
-            pypsaearth("scripts/build_bus_regions.py")
+            "../pypsa-earth/scripts/build_bus_regions.py"
 
     rule dist_filter_data:
         input:
@@ -312,11 +358,12 @@ rule dist_build_renewable_profiles:
         countries=config["countries"],
         alternative_clustering=config["cluster_options"]["alternative_clustering"],
     input:
-        natura=pypsaearth("resources/natura.tiff"),
-        copernicus=pypsaearth(
+        natura=lambda w: [] if config["renewable"][w.technology].get("suitability") else pypsaearth("resources/natura.tiff"),
+        copernicus=lambda w: [] if config["renewable"][w.technology].get("suitability") else pypsaearth(
             "data/copernicus/PROBAV_LC100_global_v3.0.1_2019-nrt_Discrete-Classification-map_EPSG-4326.tif"
         ),
-        gebco=pypsaearth("data/gebco/GEBCO_2025_sub_ice.nc"),
+        gebco=lambda w: [] if config["renewable"][w.technology].get("suitability") else pypsaearth("data/gebco/GEBCO_2025_sub_ice.nc"),
+        suitability=lambda w: config["renewable"][w.technology].get("suitability", {}).get("path", []),
         country_shapes="resources/shapes/microgrid_shapes.geojson",
         offshore_shapes=pypsaearth("resources/shapes/offshore_shapes.geojson"),
         hydro_capacities="pypsa-earth/data/hydro_capacities.csv",
@@ -331,7 +378,14 @@ rule dist_build_renewable_profiles:
                 )
             )
             if config.get("mode") == "brown_field"
-            else "resources/shapes/microgrid_bus_shapes.geojson"
+            else (
+                lambda w: (
+                    "resources/shapes/candidate_sites.geojson"
+                    if config.get("generation_sites", {}).get("enabled", False)
+                    and w.technology in ("solar", "onwind")
+                    else "resources/shapes/microgrid_bus_shapes.geojson"
+                )
+            )
         ),
         cutout=lambda w: pypsaearth(
             "cutouts/" + config["renewable"][w.technology]["cutout"] + ".nc"
@@ -346,7 +400,7 @@ rule dist_build_renewable_profiles:
     resources:
         mem_mb=ATLITE_NPROCESSES * 5000,
     script:
-        pypsaearth("scripts/build_renewable_profiles.py")
+        "../pypsa-earth/scripts/build_renewable_profiles.py"
 
 
 rule dist_add_electricity:
@@ -365,6 +419,7 @@ rule dist_add_electricity:
         tech_costs=COSTS,
         load_file="resources/demand/microgrid_load.csv",
         powerplants="resources/powerplants.csv",
+        microgrid_shapes="resources/shapes/microgrid_shapes.geojson",
     output:
         "networks/elec.nc",
     log:
@@ -381,12 +436,13 @@ rule dist_add_electricity:
 rule dist_solve_network:
     input:
         "networks/elec.nc",
+        tech_costs="data/costs_{planning_horizon}.csv",
     output:
-        "networks/results/elec.nc",
+        "networks/results/" + RDIR + "{planning_horizon}/elec.nc",
     log:
-        "logs/dist_solve_network.log",
+        "logs/dist_solve_network_{planning_horizon}.log",
     benchmark:
-        "benchmarks/dist_solve_network"
+        "benchmarks/dist_solve_network_{planning_horizon}"
     threads: 1
     resources:
         mem_mb=3000,

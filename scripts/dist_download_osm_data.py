@@ -4,6 +4,8 @@ import logging
 import os
 import shutil
 import time
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import geopandas as gpd
@@ -82,6 +84,7 @@ def retrieve_osm_data_geojson(
     output_path_generators,
     output_path_substations,
     output_path_poles,
+    overpass_options=None,
 ):
     """
     Download OpenStreetMap data via Overpass for a set of microgrid bounding boxes
@@ -116,11 +119,40 @@ def retrieve_osm_data_geojson(
     """
 
     def _run_feature(feature, geometry_type, outpath):
-        DELAY_S = 2.0
-        RETRY_SLEEP_S = 5.0
-        MAX_ATTEMPTS_PER_GRID = 3
+        options = overpass_options or {}
+        delay_s = max(0.0, float(options.get("request_interval_seconds", 5)))
+        retry_base_s = max(
+            0.0, float(options.get("retry_backoff_base_seconds", 15))
+        )
+        retry_max_s = max(
+            retry_base_s,
+            float(options.get("retry_backoff_max_seconds", 120)),
+        )
+        max_attempts = max(1, int(options.get("max_attempts_per_grid", 5)))
         last_err: Exception | None = None
         HEADERS = {"User-Agent": "pypsa-distribution/0.0.2", "Accept": "*/*"}
+        retryable_statuses = {406, 408, 429, 500, 502, 503, 504, 520, 524}
+
+        def _retry_after_seconds(value):
+            if not value:
+                return None
+            try:
+                return max(0.0, float(value))
+            except ValueError:
+                try:
+                    retry_at = parsedate_to_datetime(value)
+                    if retry_at.tzinfo is None:
+                        retry_at = retry_at.replace(tzinfo=timezone.utc)
+                    return max(
+                        0.0,
+                        (retry_at - datetime.now(timezone.utc)).total_seconds(),
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    return None
+
+        def _backoff_seconds(attempt, retry_after=None):
+            exponential = min(retry_base_s * (2 ** (attempt - 1)), retry_max_s)
+            return max(exponential, retry_after or 0.0)
 
         def _build_query(lat_min, lon_min, lat_max, lon_max):
             if feature == "building":
@@ -132,8 +164,8 @@ def retrieve_osm_data_geojson(
             elif feature == "minor_line":
                 return f"""
                 [out:json][timeout:300];
-                ( way["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max});
-                  relation["power"~"^(minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
+                                ( way["power"~"^(line|minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max});
+                                    relation["power"~"^(line|minor_line)$"]({lat_min},{lon_min},{lat_max},{lon_max}); );
                 (._;>;);
                 out body;"""
             elif feature == "cable":
@@ -214,50 +246,78 @@ def retrieve_osm_data_geojson(
             )
             if overpass_query is None:
                 return []
-            try:
-                logger.info(f"Overpass query: {grid_name} / {feature}")
-                r = requests.post(
-                    url, data={"data": overpass_query}, headers=HEADERS, timeout=240
-                )
-                # Only re-issue the request if the first one actually failed --
-                # firing a second request unconditionally just doubles load on
-                # the (rate-limited) Overpass server for no benefit.
-                if r.status_code in (406, 429, 502, 503, 504):
-                    time.sleep(5)
-                    r = requests.post(
-                        url, data={"data": overpass_query}, headers=HEADERS, timeout=240
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    logger.info(
+                        f"Overpass query: {grid_name} / {feature} "
+                        f"(attempt {attempt}/{max_attempts})"
                     )
-                r.raise_for_status()
-                data = r.json()
-                return _parse_elements(data, grid_name)
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Overpass error for {grid_name}/{feature}: {e}.")
-                return []
+                    response = requests.post(
+                        url,
+                        data={"data": overpass_query},
+                        headers=HEADERS,
+                        timeout=240,
+                    )
+                except requests.RequestException as exc:
+                    last_err = exc
+                    if attempt == max_attempts:
+                        logger.warning(
+                            f"Overpass request failed for {grid_name}/{feature} "
+                            f"after {attempt} attempts: {exc}"
+                        )
+                        return []
+                    wait_s = _backoff_seconds(attempt)
+                    logger.warning(
+                        f"Overpass request failed for {grid_name}/{feature}: {exc}; "
+                        f"retrying in {wait_s:.1f}s"
+                    )
+                    time.sleep(wait_s)
+                    continue
+
+                if response.status_code in retryable_statuses:
+                    last_err = requests.HTTPError(
+                        f"HTTP {response.status_code}: {response.reason}",
+                        response=response,
+                    )
+                    if attempt == max_attempts:
+                        logger.warning(
+                            f"Overpass returned HTTP {response.status_code} for "
+                            f"{grid_name}/{feature}; exhausted {max_attempts} attempts."
+                        )
+                        return []
+                    retry_after = _retry_after_seconds(
+                        response.headers.get("Retry-After")
+                    )
+                    wait_s = _backoff_seconds(attempt, retry_after)
+                    logger.warning(
+                        f"Overpass returned HTTP {response.status_code} for "
+                        f"{grid_name}/{feature}; retrying in {wait_s:.1f}s"
+                    )
+                    time.sleep(wait_s)
+                    continue
+
+                try:
+                    response.raise_for_status()
+                    last_err = None
+                    return _parse_elements(response.json(), grid_name)
+                except (requests.RequestException, ValueError) as exc:
+                    last_err = exc
+                    logger.warning(
+                        f"Could not read Overpass response for {grid_name}/{feature}: {exc}"
+                    )
+                    return []
+
+            return []
 
         def _collect_records() -> list[dict]:
             records: list[dict] = []
             for grid_name, grid_data in microgrids_list.items():
                 grid_records: list[dict] = []
-                for attempt in range(1, MAX_ATTEMPTS_PER_GRID + 1):
-                    grid_records = _fetch_grid(grid_name, grid_data)
-                    if grid_records:
-                        break
-                    if attempt < MAX_ATTEMPTS_PER_GRID:
-                        logger.warning(
-                            f"No data for {grid_name}/{feature} "
-                            f"(attempt {attempt}/{MAX_ATTEMPTS_PER_GRID}); "
-                            f"retrying in {RETRY_SLEEP_S:.0f}s..."
-                        )
-                        time.sleep(RETRY_SLEEP_S)
+                grid_records = _fetch_grid(grid_name, grid_data)
                 if not grid_records:
-                    logger.warning(
-                        f"Giving up on {grid_name}/{feature} after "
-                        f"{MAX_ATTEMPTS_PER_GRID} attempts -- likely Overpass "
-                        "rate-limiting rather than a genuine absence of data."
-                    )
+                    logger.info(f"No {feature} data returned for {grid_name}.")
                 records.extend(grid_records)
-                time.sleep(DELAY_S)
+                time.sleep(delay_s)
             return records
 
         records = _collect_records()
@@ -532,6 +592,7 @@ if __name__ == "__main__":
                 output_path_generators=snakemake.output["generators_resources"],
                 output_path_substations=snakemake.output["substations_resources"],
                 output_path_poles=snakemake.output["poles_resources"],
+                overpass_options=snakemake.params.overpass_options,
             )
         else:
             # In green_field mode, only download buildings
@@ -544,6 +605,7 @@ if __name__ == "__main__":
                 output_path_generators=None,
                 output_path_substations=None,
                 output_path_poles=None,
+                overpass_options=snakemake.params.overpass_options,
             )
             # Create empty GeoJSON files for the other features
             for output_path in [

@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pypsa
 from _helpers_dist import configure_logging, read_geojson, sets_path_to_root
-from pyproj import Transformer
+from pyproj import Geod, Transformer
 from scipy.spatial import Delaunay, QhullError, distance
 from shapely.geometry import Point, Polygon
 
@@ -57,6 +57,9 @@ def create_microgrid_network(
     interconnect_microgrids,
     microgrid_list,
     input_path,
+    site_path=None,
+    site_options=None,
+    discount_rate=0.07,
 ):
     """
     Creates local microgrid networks within the PyPSA network. The local microgrid networks are distribution networks created based on
@@ -89,6 +92,21 @@ def create_microgrid_network(
     data = gpd.read_file(input_file)
     load = pd.read_csv(input_path)
     bus_coords = set()  # Keep track of bus coordinates to avoid duplicates
+    sites = gpd.read_file(site_path).to_crs("EPSG:4326") if site_path else None
+    if sites is not None and (sites.empty or not sites.name.is_unique):
+        raise ValueError("Candidate sites must have unique, nonempty bus names")
+    geod = Geod(ellps="WGS84")
+    if site_options:
+        if site_options["line_investment_eur_per_mva_km"] <= 0 or site_options["line_route_factor"] <= 0:
+            raise ValueError("Site connection investment and routing factor must be positive")
+        years = site_options["line_lifetime_years"]
+        annuity = discount_rate / (1 - (1 + discount_rate) ** -years)
+        line_cost = (
+            site_options["line_investment_eur_per_mva_km"]
+            * annuity
+            * n.snapshot_weightings.objective.sum()
+            / 8760
+        )
 
     for grid_name, grid_data in microgrid_list.items():
         # List to store bus names and their positions for triangulation
@@ -183,7 +201,7 @@ def create_microgrid_network(
             # Convert to a projected CRS (e.g., EPSG:3857 for meters)
             gdf_proj = gdf.to_crs(epsg=3857)
             # Calculate distance (in kilometers)
-            distance_km = gdf_proj[0].distance(gdf_proj[1]) / 1000
+            distance_km = max(gdf_proj[0].distance(gdf_proj[1]) / 1000, 0.01)
             df_aux = pd.DataFrame(
                 {
                     "line_name": [line_name],
@@ -193,6 +211,8 @@ def create_microgrid_network(
                     "s_nom": [0.1],
                     "s_nom_extendable": True,
                     "length": [distance_km],
+                    "capital_cost": [distance_km * site_options["line_route_factor"] * line_cost]
+                    if site_options else [0.0],
                 }
             )
             df = pd.concat([df, df_aux])
@@ -200,6 +220,30 @@ def create_microgrid_network(
         df.index = df["line_name"]
         df.drop("line_name", axis=1, inplace=True)
         n.import_components_from_dataframe(df, "Line")
+
+        if sites is not None:
+            for feature in sites[sites.name_microgrid == grid_name].itertuples():
+                if feature.name in n.buses.index or not np.isfinite([feature.x, feature.y]).all():
+                    raise ValueError(f"Invalid candidate bus {feature.name}")
+                distances = [
+                    geod.inv(feature.x, feature.y, n.buses.at[bus, "x"], n.buses.at[bus, "y"])[2]
+                    for bus in microgrid_buses[1:]
+                ]
+                nearest = microgrid_buses[1 + int(np.argmin(distances))]
+                length_km = max(min(distances) / 1000, 0.01)
+                if length_km > site_options["max_connection_km"]:
+                    raise ValueError(f"Candidate {feature.name} is too far from the load network")
+                n.add(
+                    "Bus", feature.name, x=feature.x, y=feature.y,
+                    v_nom=voltage_level, sub_network=grid_name,
+                )
+                length_km *= site_options["line_route_factor"]
+                n.add(
+                    "Line", f"{feature.name}_connection", bus0=feature.name,
+                    bus1=nearest, type=line_type, s_nom=0.0,
+                    s_nom_extendable=True, length=length_km,
+                    capital_cost=length_km * line_cost,
+                )
 
     df = pd.DataFrame()
     if interconnect_microgrids == True:
@@ -255,7 +299,7 @@ def create_microgrid_network(
                 # Convert to a projected CRS (e.g., EPSG:3857 for meters)
                 gdf_proj = gdf.to_crs(epsg=3857)
                 # Calculate distance (in kilometers)
-                distance_km = gdf_proj[0].distance(gdf_proj[1]) / 1000
+                distance_km = max(gdf_proj[0].distance(gdf_proj[1]) / 1000, 0.01)
                 df_aux = pd.DataFrame(
                     {
                         "line_name": [line_name],
@@ -265,6 +309,8 @@ def create_microgrid_network(
                         "s_nom": [0.1],
                         "s_nom_extendable": True,
                         "length": [distance_km],
+                        "capital_cost": [distance_km * site_options["line_route_factor"] * line_cost]
+                        if site_options else [0.0],
                     }
                 )
                 df = pd.concat([df, df_aux])
@@ -377,6 +423,9 @@ if __name__ == "__main__":
         snakemake.config["enable"]["interconnect_microgrids"],
         microgrids_list,
         snakemake.input["load"],
+        snakemake.input["candidate_sites"] if snakemake.config.get("generation_sites", {}).get("enabled", False) else None,
+        snakemake.config.get("generation_sites") if snakemake.config.get("generation_sites", {}).get("enabled", False) else None,
+        snakemake.config["costs"]["discountrate"],
     )
     a = 12
     n.export_to_netcdf(snakemake.output[0])

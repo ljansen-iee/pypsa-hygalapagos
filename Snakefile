@@ -49,6 +49,8 @@ configfile: "configs/config.pypsa-earth.yaml"
 
 configfile: "configs/config.distribution.yaml"
 
+configfile: "configs/config.hygalapagos.yaml"
+
 
 if exists("config.yaml"):
 
